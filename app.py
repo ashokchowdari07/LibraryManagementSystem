@@ -5,12 +5,23 @@ from datetime import date, timedelta
 from functools import wraps
 from werkzeug.security import check_password_hash
 
+import tempfile
+
 # ─── App Setup ───────────────────────────────────────────────────────────────
-app = Flask(__name__)
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+
+app = Flask(
+    __name__,
+    template_folder=os.path.join(BASE_DIR, "templates"),
+    static_folder=os.path.join(BASE_DIR, "static")
+)
 app.secret_key = "library_secret_key_2024"   # Used to keep login sessions secure
 
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DATABASE = os.path.join(BASE_DIR, "database.db")   # Path to SQLite database file
+# On Vercel / Serverless environments, the filesystem is strictly read-only except tempdir (/tmp on Linux)
+if os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+    DATABASE = os.path.join(tempfile.gettempdir(), "database.db")
+else:
+    DATABASE = os.path.join(BASE_DIR, "database.db")   # Local SQLite database path
 
 # ─── Database Helper ─────────────────────────────────────────────────────────
 def get_db():
@@ -90,11 +101,40 @@ def init_db():
         INSERT OR IGNORE INTO users (username, password) VALUES ('admin', 'admin123')
     """)
 
+    # Pre-seed starter catalog if empty (ensures clean demo state on fresh deployments)
+    book_count = cursor.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+    if book_count == 0:
+        cursor.execute("""
+            INSERT INTO books (title, author, category, isbn, quantity, available) VALUES
+            ('The Alchemist', 'Paulo Coelho', 'Fiction', '978-0062315007', 5, 5),
+            ('Clean Code', 'Robert C. Martin', 'Technology', '978-0132350884', 3, 3),
+            ('To Kill a Mockingbird', 'Harper Lee', 'Classic', '978-0446310789', 4, 4)
+        """)
+
+    member_count = cursor.execute("SELECT COUNT(*) FROM members").fetchone()[0]
+    if member_count == 0:
+        cursor.execute("""
+            INSERT INTO members (name, student_id, email, phone) VALUES
+            ('Rahul Sharma', 'STU2024001', 'rahul.test@example.com', '9876543210')
+        """)
+
     conn.commit()
     conn.close()
 
-# Auto-initialize database on import/startup
-init_db()
+# Auto-initialize database safely on startup
+try:
+    init_db()
+except Exception as e:
+    print(f"Initial database setup notice: {e}")
+
+# Ensure database tables exist before handling any request (vital for serverless cold starts)
+@app.before_request
+def ensure_db():
+    if not os.path.exists(DATABASE):
+        try:
+            init_db()
+        except Exception as e:
+            print(f"ensure_db notice: {e}")
 
 # ─── Auth Decorator ──────────────────────────────────────────────────────────
 def login_required(f):
